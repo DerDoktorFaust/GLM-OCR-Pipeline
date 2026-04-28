@@ -7,13 +7,16 @@ from pathlib import Path
 import fitz  # PyMuPDF
 
 
-MODEL_PATH = "/Users/cgoodwin/.lmstudio/models/mlx-community/GLM-OCR-bf16"
+MODEL_PATH = "/Users/cgoodwin/.lmstudio/models/mlx-community/Qwen2.5-VL-7B-Instruct-8bit"
 
 OCR_PROMPT = (
-    "Text Recognition: Extract all visible text from this scanned page as clean Markdown. "
-    "Preserve headings, paragraphs, footnotes, page structure, and line order as much as possible. "
-    "Do not summarize. Do not modernize spelling. Do not correct grammar. "
-    "Transcribe the page as faithfully as possible."
+    "Transcribe this page exactly. "
+    "Do not summarize. "
+    "Do not correct spelling. "
+    "Do not modernize spelling. "
+    "Preserve line breaks and paragraph structure as much as possible. "
+    "If text is unreadable, write [unclear]. "
+    "Return only the transcription."
 )
 
 DPI = 300
@@ -21,31 +24,18 @@ MAX_TOKENS = 4096
 
 
 def clean_mlx_output(raw_output: str) -> str:
-    """
-    Extract only the model's generated text and strip logs.
-    """
     text = raw_output.strip()
 
-    # Remove deprecation warning
-    text = re.sub(
-        r"Calling `.*?` directly is deprecated\..*?\n",
-        "",
-        text,
-        flags=re.DOTALL,
-    )
+    # Remove everything before assistant output if present
+    if "<|im_start|>assistant" in text:
+        text = text.split("<|im_start|>assistant", 1)[-1].strip()
 
-    # Split on separators and try to grab the useful middle section
-    parts = text.split("==========")
-    if len(parts) >= 3:
-        text = parts[-2].strip()
-
-    # Remove <think> blocks
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-
-    # Remove token stats
-    text = re.sub(r"Prompt:.*?tokens-per-sec", "", text, flags=re.DOTALL)
-    text = re.sub(r"Generation:.*?tokens-per-sec", "", text, flags=re.DOTALL)
-    text = re.sub(r"Peak memory:.*", "", text, flags=re.DOTALL)
+    # Remove mlx-vlm stats/log sections
+    text = re.sub(r"=+\nPrompt:.*", "", text, flags=re.DOTALL)
+    text = re.sub(r"Files: \[.*?\]\s*", "", text, flags=re.DOTALL)
+    text = re.sub(r"Prompt: .*?tokens-per-sec", "", text, flags=re.DOTALL)
+    text = re.sub(r"Generation: .*?tokens-per-sec", "", text, flags=re.DOTALL)
+    text = re.sub(r"Peak memory: .*", "", text, flags=re.DOTALL)
 
     return text.strip()
 
@@ -61,7 +51,7 @@ def pdf_page_to_temp_image(page, page_number: int, temp_dir: Path) -> Path:
     return image_path
 
 
-def run_glm_ocr(image_path: Path) -> str:
+def run_qwen_ocr(image_path: Path) -> str:
     result = subprocess.run(
         [
             "python",
@@ -88,11 +78,8 @@ def run_glm_ocr(image_path: Path) -> str:
 
     cleaned = clean_mlx_output(result.stdout)
 
-    # Debug fallback: if cleaning nuked everything, show raw output
     if not cleaned:
-        print("WARNING: Cleaned output empty. Raw output below:\n")
-        print(result.stdout)
-        raise RuntimeError("OCR returned empty text after cleaning.")
+        raise RuntimeError("OCR returned empty text.")
 
     return cleaned
 
@@ -103,7 +90,7 @@ def ocr_page_with_retry(page, page_number: int, temp_dir: Path) -> str:
     for attempt in range(1, 3):
         try:
             print(f"Working on page {page_number} — attempt {attempt}")
-            return run_glm_ocr(image_path)
+            return run_qwen_ocr(image_path)
 
         except Exception as error:
             print(f"ERROR on page {page_number}, attempt {attempt}: {error}")
@@ -125,7 +112,6 @@ def process_pdf(pdf_path: Path, output_dir: Path) -> Path:
         raise ValueError("Input file must be a PDF.")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-
     output_path = output_dir / f"{pdf_path.stem}.md"
 
     doc = fitz.open(pdf_path)
@@ -138,7 +124,6 @@ def process_pdf(pdf_path: Path, output_dir: Path) -> Path:
 
             for index, page in enumerate(doc, start=1):
                 out.write(f"\n\n<!-- page {index} -->\n\n")
-
                 page_text = ocr_page_with_retry(page, index, temp_dir)
                 out.write(page_text)
                 out.write("\n")
@@ -149,24 +134,23 @@ def process_pdf(pdf_path: Path, output_dir: Path) -> Path:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="OCR a PDF with GLM-OCR (MLX) and output a combined Markdown file."
+        description="OCR a PDF with Qwen2.5-VL and output a combined Markdown file."
     )
 
     parser.add_argument(
         "pdf",
         type=Path,
-        help="Path to the input PDF (e.g., input/test.pdf)",
+        help="Path to input PDF, e.g. input/test.pdf",
     )
 
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("output"),
-        help="Directory for output Markdown file",
+        help="Directory for output Markdown file.",
     )
 
     args = parser.parse_args()
-
     process_pdf(args.pdf, args.output_dir)
 
 
