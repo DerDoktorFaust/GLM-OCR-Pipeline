@@ -1,10 +1,13 @@
 import argparse
+import gc
 import re
-import subprocess
 import tempfile
 from pathlib import Path
 
 import fitz  # PyMuPDF
+import mlx.core as mx
+from mlx_vlm import generate, load
+from mlx_vlm.prompt_utils import apply_chat_template
 
 
 MODEL_PATH = "/Users/cgoodwin/.lmstudio/models/mlx-community/Qwen2.5-VL-7B-Instruct-8bit"
@@ -21,26 +24,25 @@ OCR_PROMPT = (
 
 DPI = 300
 MAX_TOKENS = 4096
+TEMPERATURE = 0.0
 
 
-def clean_mlx_output(raw_output: str) -> str:
-    text = raw_output.strip()
+def clean_output(text: str) -> str:
+    """Clean generated text without damaging transcription content."""
+    text = text.strip()
 
-    # Remove everything before assistant output if present
-    if "<|im_start|>assistant" in text:
-        text = text.split("<|im_start|>assistant", 1)[-1].strip()
+    # Remove possible chat/template leftovers
+    text = text.replace("<|im_end|>", "").strip()
 
-    # Remove mlx-vlm stats/log sections
-    text = re.sub(r"=+\nPrompt:.*", "", text, flags=re.DOTALL)
-    text = re.sub(r"Files: \[.*?\]\s*", "", text, flags=re.DOTALL)
-    text = re.sub(r"Prompt: .*?tokens-per-sec", "", text, flags=re.DOTALL)
-    text = re.sub(r"Generation: .*?tokens-per-sec", "", text, flags=re.DOTALL)
-    text = re.sub(r"Peak memory: .*", "", text, flags=re.DOTALL)
+    # Remove markdown fences if the model wraps output
+    text = re.sub(r"^```(?:markdown|text)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
 
     return text.strip()
 
 
-def pdf_page_to_temp_image(page, page_number: int, temp_dir: Path) -> Path:
+def render_page_to_temp_image(page, page_number: int, temp_dir: Path) -> Path:
+    """Render one PDF page to a temporary PNG image."""
     zoom = DPI / 72
     matrix = fitz.Matrix(zoom, zoom)
     pix = page.get_pixmap(matrix=matrix, alpha=False)
@@ -51,32 +53,26 @@ def pdf_page_to_temp_image(page, page_number: int, temp_dir: Path) -> Path:
     return image_path
 
 
-def run_qwen_ocr(image_path: Path) -> str:
-    result = subprocess.run(
-        [
-            "python",
-            "-m",
-            "mlx_vlm",
-            "generate",
-            "--model",
-            MODEL_PATH,
-            "--image",
-            str(image_path),
-            "--prompt",
-            OCR_PROMPT,
-            "--max-tokens",
-            str(MAX_TOKENS),
-            "--temperature",
-            "0.0",
-        ],
-        capture_output=True,
-        text=True,
+def run_qwen_ocr(model, processor, image_path: Path) -> str:
+    """Run OCR on one image using an already-loaded Qwen2.5-VL model."""
+    formatted_prompt = apply_chat_template(
+        processor,
+        model.config,
+        OCR_PROMPT,
+        num_images=1,
     )
 
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "Unknown OCR error")
+    output = generate(
+        model,
+        processor,
+        formatted_prompt,
+        image=[str(image_path)],
+        max_tokens=MAX_TOKENS,
+        temperature=TEMPERATURE,
+        verbose=False,
+    )
 
-    cleaned = clean_mlx_output(result.stdout)
+    cleaned = clean_output(output)
 
     if not cleaned:
         raise RuntimeError("OCR returned empty text.")
@@ -84,13 +80,14 @@ def run_qwen_ocr(image_path: Path) -> str:
     return cleaned
 
 
-def ocr_page_with_retry(page, page_number: int, temp_dir: Path) -> str:
-    image_path = pdf_page_to_temp_image(page, page_number, temp_dir)
+def ocr_page_with_retry(model, processor, page, page_number: int, temp_dir: Path) -> str:
+    """OCR one page, retrying once if it fails."""
+    image_path = render_page_to_temp_image(page, page_number, temp_dir)
 
     for attempt in range(1, 3):
         try:
             print(f"Working on page {page_number} — attempt {attempt}")
-            return run_qwen_ocr(image_path)
+            return run_qwen_ocr(model, processor, image_path)
 
         except Exception as error:
             print(f"ERROR on page {page_number}, attempt {attempt}: {error}")
@@ -105,6 +102,7 @@ def ocr_page_with_retry(page, page_number: int, temp_dir: Path) -> str:
 
 
 def process_pdf(pdf_path: Path, output_dir: Path) -> Path:
+    """Process one PDF and write one combined Markdown file."""
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
 
@@ -114,19 +112,40 @@ def process_pdf(pdf_path: Path, output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{pdf_path.stem}.md"
 
-    doc = fitz.open(pdf_path)
+    print("Loading model...")
+    model, processor = load(MODEL_PATH)
+    print("Model loaded.")
 
-    with tempfile.TemporaryDirectory() as tmp:
-        temp_dir = Path(tmp)
+    try:
+        doc = fitz.open(pdf_path)
 
-        with output_path.open("w", encoding="utf-8") as out:
-            out.write(f"# OCR Output: {pdf_path.name}\n\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_dir = Path(tmp)
 
-            for index, page in enumerate(doc, start=1):
-                out.write(f"\n\n<!-- page {index} -->\n\n")
-                page_text = ocr_page_with_retry(page, index, temp_dir)
-                out.write(page_text)
-                out.write("\n")
+            with output_path.open("w", encoding="utf-8") as out:
+                out.write(f"# OCR Output: {pdf_path.name}\n\n")
+
+                for index, page in enumerate(doc, start=1):
+                    out.write(f"\n\n<!-- page {index} -->\n\n")
+
+                    page_text = ocr_page_with_retry(
+                        model=model,
+                        processor=processor,
+                        page=page,
+                        page_number=index,
+                        temp_dir=temp_dir,
+                    )
+
+                    out.write(page_text)
+                    out.write("\n")
+
+    finally:
+        print("Unloading model...")
+        del model
+        del processor
+        gc.collect()
+        mx.clear_cache()
+        print("Model unloaded.")
 
     print(f"\nDone. Markdown written to: {output_path}")
     return output_path
