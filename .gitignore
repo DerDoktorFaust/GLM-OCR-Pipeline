@@ -4,23 +4,22 @@
 # Python
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
 
 # macOS
 .DS_Store
 
-# Data (don’t commit inputs/outputs)
-data/output/
-data/input/
+# Project data (IMPORTANT)
+input/*
+output/*
 
-# Models (important)
+# Keep the folders themselves
+!input/.gitkeep
+!output/.gitkeep
+
+# Models
 models/
-*.bin
 *.safetensors
-
-# VS Code
-.vscode/
+*.bin
 
 # Logs
 *.log
