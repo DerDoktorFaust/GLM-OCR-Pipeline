@@ -62,7 +62,7 @@ def run_qwen_ocr(model, processor, image_path: Path) -> str:
         num_images=1,
     )
 
-    output = generate(
+    result = generate(
         model,
         processor,
         formatted_prompt,
@@ -71,6 +71,14 @@ def run_qwen_ocr(model, processor, image_path: Path) -> str:
         temperature=TEMPERATURE,
         verbose=False,
     )
+
+    # mlx-vlm may return a GenerationResult object rather than a string
+    if hasattr(result, "text"):
+        output = result.text
+    elif hasattr(result, "output"):
+        output = result.output
+    else:
+        output = str(result)
 
     cleaned = clean_output(output)
 
