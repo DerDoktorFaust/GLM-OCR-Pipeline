@@ -1,0 +1,26 @@
+# Virtual environment
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# macOS
+.DS_Store
+
+# Data (don’t commit inputs/outputs)
+data/output/
+data/input/
+
+# Models (important)
+models/
+*.bin
+*.safetensors
+
+# VS Code
+.vscode/
+
+# Logs
+*.log
