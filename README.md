@@ -13,4 +13,4 @@ This project extracts text from PDFs using GLM-OCR (MLX) and outputs structured 
 ### 1. Create virtual environment
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate```
+source .venv/bin/activate
